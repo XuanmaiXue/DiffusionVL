@@ -90,6 +90,17 @@ class LlavaMetaModel:
             rank0_print(f">>> Vision Tower weight loading report: {incompatible_keys}")
             del self.config.vision_tower_state_dict
 
+        # DeepStack mergers (Qwen3-VL only): load into the tower's
+        # deepstack_merger_list if present and a dedicated state dict was
+        # carried over by from_pretrained.
+        if hasattr(self.config, 'deepstack_state_dict') and hasattr(vision_tower.vision_tower, 'deepstack_merger_list'):
+            rank0_print(">>> Loading pre-converted Qwen3-VL DeepStack merger weights...")
+            ds_incompatible = vision_tower.vision_tower.load_state_dict(
+                self.config.deepstack_state_dict, strict=False
+            )
+            rank0_print(f">>> DeepStack merger weight loading report: {ds_incompatible}")
+            del self.config.deepstack_state_dict
+
         # In case it is frozen by LoRA
         for p in self.vision_resampler.parameters():
             p.requires_grad = True
@@ -208,7 +219,8 @@ class LlavaMetaForCausalLM(ABC):
     def encode_images(self, images, image_grid_thw=None):
 
         vision_tower = self.get_model().get_vision_tower()
-        if 'qwen' in vision_tower.vision_tower_name.lower():
+        name_lower = vision_tower.vision_tower_name.lower()
+        if 'qwen' in name_lower:
             # Qwen's vision tower requires `grid_thw`
             if image_grid_thw is None:
                 raise ValueError("`image_grid_thw` is required for Qwen vision tower but not provided.")
@@ -399,7 +411,7 @@ class LlavaMetaForCausalLM(ABC):
             # We just need to use them directly, along with the pre-computed grid_thw.
             if image_grid_thws is None:
                 raise ValueError("`image_grid_thws` must be provided by the dataloader for Qwen models.")
-            
+
             images_to_encode = concat_images
             image_grid_thw = torch.tensor(image_grid_thws, device=self.device)
         else:
@@ -407,14 +419,33 @@ class LlavaMetaForCausalLM(ABC):
             image_grid_thw = None
 
         image_features_tuple = self.encode_images(images_to_encode, image_grid_thw=image_grid_thw)
-        ordered_image_features = self.get_model().mm_projector(image_features_tuple)
+        projector_out = self.get_model().mm_projector(image_features_tuple)
+
+        # Qwen3-VL projector returns (features, deepstack_features); Qwen2.5-VL
+        # returns a plain tensor. Normalize both to (features, deepstack_features).
+        is_qwen3 = 'qwen3' in vision_tower.vision_tower_name.lower()
+        if isinstance(projector_out, tuple):
+            ordered_image_features, deepstack_image_embeds = projector_out
+        else:
+            ordered_image_features, deepstack_image_embeds = projector_out, None
 
         if 'qwen' in vision_tower.vision_tower_name.lower():
             split_sizes = (image_grid_thw.prod(dim=1) // (self.get_vision_tower().vision_tower.spatial_merge_size ** 2)).tolist()
         else:
             split_sizes = [image.shape[0] for image in images_list]
-        
+
         ordered_image_features_list = torch.split(ordered_image_features, split_sizes)
+
+        # Split DeepStack features per image, in image order. Each deepstack
+        # layer's tensor is (total_visual_seq_len, hidden_size); split it the
+        # same way as the main features so they stay aligned during splicing.
+        deepstack_per_image = None
+        if deepstack_image_embeds is not None:
+            deepstack_per_image = [
+                [torch.split(ds, split_sizes) for ds in deepstack_image_embeds]
+            ]  # shape: [1][layer][image]
+            # unwrap the outer list
+            deepstack_per_image = deepstack_per_image[0]
 
         image_features = []
 
@@ -574,9 +605,16 @@ class LlavaMetaForCausalLM(ABC):
 
         new_input_embeds = []
         new_labels = []
+        # Per-batch list of (start, end) offsets of visual tokens within the
+        # *unpadded* sequence, plus the per-image DeepStack features aligned to
+        # those spans. Used to build visual_pos_masks / deepstack_visual_embeds.
+        per_batch_visual_spans = []
+        per_batch_deepstack = []
         cur_image_idx = 0
         for batch_idx, cur_input_ids in enumerate(input_ids):
             num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
+            visual_spans = []
+            batch_deepstack = []  # list (per image) of list (per layer) of tensor
             if num_images == 0:
                 cur_image_features = image_features[cur_image_idx]
                 cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids)
@@ -584,6 +622,8 @@ class LlavaMetaForCausalLM(ABC):
                 new_input_embeds.append(cur_input_embeds)
                 new_labels.append(labels[batch_idx])
                 cur_image_idx += 1
+                per_batch_visual_spans.append(visual_spans)
+                per_batch_deepstack.append(batch_deepstack)
                 continue
 
             image_token_indices = [-1] + torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0].tolist() + [cur_input_ids.shape[0]]
@@ -599,17 +639,29 @@ class LlavaMetaForCausalLM(ABC):
             cur_new_input_embeds = []
             cur_new_labels = []
 
+            running_len = 0
             for i in range(num_images + 1):
                 cur_new_input_embeds.append(cur_input_embeds_no_im[i])
                 cur_new_labels.append(cur_labels_noim[i])
+                running_len += cur_input_embeds_no_im[i].shape[0]
                 if i < num_images:
                     try:
                         cur_image_features = image_features[cur_image_idx]
                     except IndexError:
                         cur_image_features = image_features[cur_image_idx - 1]
+                    # Collect this image's DeepStack features (one tensor per layer).
+                    if deepstack_per_image is not None:
+                        img_ds = [
+                            deepstack_per_image[layer][cur_image_idx]
+                            for layer in range(len(deepstack_per_image))
+                        ]
+                        batch_deepstack.append(img_ds)
                     cur_image_idx += 1
                     cur_new_input_embeds.append(cur_image_features)
-                    cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
+                    n_vis = cur_image_features.shape[0]
+                    cur_new_labels.append(torch.full((n_vis,), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
+                    visual_spans.append((running_len, running_len + n_vis))
+                    running_len += n_vis
 
             cur_new_input_embeds = [x.to(self.device) for x in cur_new_input_embeds]
 
@@ -618,6 +670,8 @@ class LlavaMetaForCausalLM(ABC):
 
             new_input_embeds.append(cur_new_input_embeds)
             new_labels.append(cur_new_labels)
+            per_batch_visual_spans.append(visual_spans)
+            per_batch_deepstack.append(batch_deepstack)
 
         # Truncate sequences to max length as image embeddings can make the sequence longer
         tokenizer_model_max_length = getattr(self.config, "tokenizer_model_max_length", None)
@@ -633,23 +687,64 @@ class LlavaMetaForCausalLM(ABC):
         new_labels_padded = torch.full((batch_size, max_len), IGNORE_INDEX, dtype=new_labels[0].dtype, device=new_labels[0].device)
         attention_mask = torch.zeros((batch_size, max_len), dtype=attention_mask.dtype, device=attention_mask.device)
         position_ids = torch.zeros((batch_size, max_len), dtype=position_ids.dtype, device=position_ids.device)
+        # visual_pos_masks[i, j] = True iff position j in the padded sequence is a
+        # visual token. Used by DeepStack injection in the LM decoder.
+        visual_pos_masks = torch.zeros((batch_size, max_len), dtype=torch.bool, device=attention_mask.device)
+        # deepstack_layer_features[layer] = concatenated visual features for all
+        # images in the batch, in the same order as the True entries of
+        # visual_pos_masks. Shape: (total_visual_tokens, hidden_size).
+        deepstack_layer_features = None
+        if deepstack_per_image is not None:
+            deepstack_layer_features = [None] * len(deepstack_per_image)
 
         for i, (cur_new_embed, cur_new_labels) in enumerate(zip(new_input_embeds, new_labels)):
             cur_len = cur_new_embed.shape[0]
             if getattr(self.config, "tokenizer_padding_side", "right") == "left":
+                pad_offset = max_len - cur_len
                 new_input_embeds_padded.append(torch.cat((torch.zeros((max_len - cur_len, cur_new_embed.shape[1]), dtype=cur_new_embed.dtype, device=cur_new_embed.device), cur_new_embed), dim=0))
                 if cur_len > 0:
                     new_labels_padded[i, -cur_len:] = cur_new_labels
                     attention_mask[i, -cur_len:] = True
                     position_ids[i, -cur_len:] = torch.arange(0, cur_len, dtype=position_ids.dtype, device=position_ids.device)
             else:
+                pad_offset = 0
                 new_input_embeds_padded.append(torch.cat((cur_new_embed, torch.zeros((max_len - cur_len, cur_new_embed.shape[1]), dtype=cur_new_embed.dtype, device=cur_new_embed.device)), dim=0))
                 if cur_len > 0:
                     new_labels_padded[i, :cur_len] = cur_new_labels
                     attention_mask[i, :cur_len] = True
                     position_ids[i, :cur_len] = torch.arange(0, cur_len, dtype=position_ids.dtype, device=position_ids.device)
 
+            # Mark visual token positions in the padded sequence and accumulate
+            # the per-layer DeepStack features in batch order.
+            for img_i, (vstart, vend) in enumerate(per_batch_visual_spans[i]):
+                # Truncation may have cut off trailing visual spans.
+                if vstart >= cur_len:
+                    break
+                vend_clipped = min(vend, cur_len)
+                pstart = pad_offset + vstart
+                pend = pad_offset + vend_clipped
+                visual_pos_masks[i, pstart:pend] = True
+                if deepstack_layer_features is not None and img_i < len(per_batch_deepstack[i]):
+                    n_kept = vend_clipped - vstart
+                    for layer in range(len(deepstack_layer_features)):
+                        ds_tensor = per_batch_deepstack[i][img_i][layer][:n_kept]
+                        deepstack_layer_features[layer] = (
+                            ds_tensor if deepstack_layer_features[layer] is None
+                            else torch.cat([deepstack_layer_features[layer], ds_tensor], dim=0)
+                        )
+
         new_input_embeds = torch.stack(new_input_embeds_padded, dim=0)
+
+        # Assemble the final DeepStack embedding list (one entry per injection
+        # layer). If there were no visual tokens, leave it as None.
+        deepstack_visual_embeds = None
+        if deepstack_layer_features is not None and any(f is not None for f in deepstack_layer_features):
+            deepstack_visual_embeds = [
+                f.to(new_input_embeds.device, new_input_embeds.dtype) for f in deepstack_layer_features if f is not None
+            ]
+        elif deepstack_per_image is not None:
+            # DeepStack requested but no visual tokens survived: drop the mask too.
+            visual_pos_masks = None
 
         if _labels is None:
             new_labels = None
@@ -730,7 +825,16 @@ class LlavaMetaForCausalLM(ABC):
                     new_input_embeds = padded_inputs_embeds
                     new_labels = padded_labels
                     attention_mask = padded_attention_mask
-                    
+
+                    # Extend visual_pos_masks to the EOS-padded length (new
+                    # positions are EOS padding, not visual tokens).
+                    if visual_pos_masks is not None and new_max_length > visual_pos_masks.shape[1]:
+                        extra = torch.zeros(
+                            (batch_size, new_max_length - visual_pos_masks.shape[1]),
+                            dtype=visual_pos_masks.dtype, device=visual_pos_masks.device,
+                        )
+                        visual_pos_masks = torch.cat([visual_pos_masks, extra], dim=1)
+
                     if position_ids is not None:
                         old_len = position_ids.shape[1]
                         if new_max_length > old_len:
@@ -742,10 +846,13 @@ class LlavaMetaForCausalLM(ABC):
                 else:
                     raise ValueError("attention_mask is None")
                     
-        # add conversation_ids 
-        if is_llada and attention_mask is not None: 
+        # add conversation_ids
+        if is_llada and attention_mask is not None:
             conversation_ids = self.generate_conversation_ids(new_labels)
             return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels, conversation_ids
+        # Qwen3-VL path additionally returns DeepStack visual masks/embeds.
+        if deepstack_per_image is not None:
+            return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels, visual_pos_masks, deepstack_visual_embeds
         return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels
 
     def initialize_vision_tokenizer(self, model_args, tokenizer):

@@ -63,6 +63,10 @@ def build_vision_projector(config, **kwargs):
         from .qwen_projector import LlavaQwenProjector
         return LlavaQwenProjector(kwargs["vision_cfg"])
 
+    if projector_type == 'qwen3_merger':
+        from .qwen3_projector import LlavaQwen3Projector
+        return LlavaQwen3Projector(kwargs["vision_cfg"])
+
     if projector_type == "identity":
         return IdentityMap()
 
