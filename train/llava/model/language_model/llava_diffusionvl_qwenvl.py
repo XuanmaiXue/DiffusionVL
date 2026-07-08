@@ -769,6 +769,33 @@ class DiffusionVLQwenVLForCausalLM(DiffusionVLQwenVLForCausalLM_Base, LlavaMetaF
             model.config.vision_tower_state_dict = load_file(os.path.join(pretrained_model_name_or_path, "vision_tower.safetensors"), device='cpu')
             model.config.projector_state_dict = load_file(os.path.join(pretrained_model_name_or_path, "projector.safetensors"), device='cpu')
 
+        # Auto-build the vision modules so a bare from_pretrained() call is
+        # sufficient for inference (no need for the training-side
+        # initialize_vision_modules step). We synthesize the minimal model_args
+        # that initialize_vision_modules expects. This works for both:
+        #   - converted checkpoints (vision_config.json + separate .safetensors)
+        #   - training-saved checkpoints (all weights in model.safetensors,
+        #     already loaded by super().from_pretrained above)
+        import types as _types
+        _torch_dtype = kwargs.get("torch_dtype", kwargs.get("dtype", None))
+        _compute_dtype = torch.bfloat16 if _torch_dtype in (torch.bfloat16, "bfloat16") else torch.float16
+        model_args = _types.SimpleNamespace(
+            vision_tower=pretrained_model_name_or_path,
+            mm_vision_select_layer=getattr(model.config, "mm_vision_select_layer", -2),
+            mm_vision_select_feature=getattr(model.config, "mm_vision_select_feature", "patch"),
+            pretrain_mm_mlp_adapter=None,
+            mm_patch_merge_type=getattr(model.config, "mm_patch_merge_type", "flat"),
+            mm_projector_type=getattr(model.config, "mm_projector_type", "qwen_merger"),
+            add_faster_video=getattr(model.config, "add_faster_video", False),
+            vision_tower_pretrained=getattr(model.config, "vision_tower_pretrained", ""),
+        )
+        model.get_model().initialize_vision_modules(model_args=model_args)
+        _vt = model.get_vision_tower()
+        if _vt is not None:
+            _vt.to(dtype=_compute_dtype, device=next(model.parameters()).device)
+        if model.get_model().mm_projector is not None:
+            model.get_model().mm_projector.to(dtype=_compute_dtype, device=next(model.parameters()).device)
+
         print(">>> DiffusionVL-QwenVL model loaded successfully.")
         return model
 

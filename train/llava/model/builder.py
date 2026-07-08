@@ -39,6 +39,7 @@ def load_pretrained_model(
     Load a pretrained model for inference.
 
     Supported models:
+    - DiffusionVL-Qwen3VL (diffusionvl_qwen3vl): Qwen3-VL + DeepStack + BD3-LM
     - DiffusionVL-QwenVL (diffusionvl_qwenvl): Qwen2.5-VL + BD3-LM
     - DiffusionVL-Qwen (diffusionvl_qwen): Qwen2.5 + BD3-LM
     - LLaVA-Qwen (llava_qwen): Standard autoregressive Qwen
@@ -73,7 +74,9 @@ def load_pretrained_model(
     rank0_print(f"Detected model type: {model_type}")
 
     # Load model based on type
-    if model_type == "diffusionvl_qwenvl":
+    if model_type == "diffusionvl_qwen3vl":
+        tokenizer, model = _load_diffusionvl_qwen3vl(model_path, attn_implementation, customized_config, overwrite_config, kwargs)
+    elif model_type == "diffusionvl_qwenvl":
         tokenizer, model = _load_diffusionvl_qwenvl(model_path, attn_implementation, customized_config, overwrite_config, kwargs)
     elif model_type == "diffusionvl_qwen":
         tokenizer, model = _load_diffusionvl_qwen(model_path, attn_implementation, customized_config, overwrite_config, kwargs)
@@ -84,7 +87,7 @@ def load_pretrained_model(
     elif model_type == "llava_llada":
         tokenizer, model = _load_llava_llada(model_path, attn_implementation, customized_config, overwrite_config, kwargs)
     else:
-        raise ValueError(f"Unsupported model type: {model_type}. Supported types: diffusionvl_qwenvl, diffusionvl_qwen, llava_qwen, llava_llada_bd3lm, llava_llada")
+        raise ValueError(f"Unsupported model type: {model_type}. Supported types: diffusionvl_qwen3vl, diffusionvl_qwenvl, diffusionvl_qwen, llava_qwen, llava_llada_bd3lm, llava_llada")
 
     rank0_print(f"Model Class: {model.__class__.__name__}")
 
@@ -104,7 +107,17 @@ def load_pretrained_model(
     if not vision_tower.is_loaded:
         vision_tower.load_model(model_path=model_path, device_map=device_map)
     if device_map != "auto":
-        vision_tower.to(device="cuda", dtype=torch.float16)
+        # Device-agnostic: respect the requested torch_dtype instead of
+        # hardcoding cuda/float16 (breaks on NPU/Ascend builds).
+        _target_dtype = torch.float16
+        if torch_dtype == "bfloat16":
+            _target_dtype = torch.bfloat16
+        if device_map is not None and not isinstance(device_map, str):
+            vision_tower.to(device=device_map, dtype=_target_dtype)
+        elif torch.cuda.is_available():
+            vision_tower.to(device="cuda", dtype=_target_dtype)
+        elif hasattr(torch, "npu") and torch.npu.is_available():
+            vision_tower.to(device="npu", dtype=_target_dtype)
     image_processor = vision_tower.image_processor
 
     # Determine context length
@@ -134,7 +147,9 @@ def _detect_model_type(model_path, model_name, force_model_type):
                 config_dict = json.load(f)
             model_type = config_dict.get("model_type", "")
 
-            if model_type in ["diffusionvl_qwenvl", "llada_qwen"]:
+            if model_type == "diffusionvl_qwen3vl":
+                return "diffusionvl_qwen3vl"
+            elif model_type in ["diffusionvl_qwenvl", "llada_qwen"]:
                 return "diffusionvl_qwenvl"
             elif model_type == "diffusionvl_qwen":
                 return "diffusionvl_qwen"
@@ -149,7 +164,9 @@ def _detect_model_type(model_path, model_name, force_model_type):
 
     # Fallback to model name heuristics
     model_name_lower = model_name.lower()
-    if "diffusionvl" in model_name_lower and "qwenvl" in model_name_lower:
+    if "diffusionvl" in model_name_lower and "qwen3vl" in model_name_lower:
+        return "diffusionvl_qwen3vl"
+    elif "diffusionvl" in model_name_lower and "qwenvl" in model_name_lower:
         return "diffusionvl_qwenvl"
     elif "diffusionvl" in model_name_lower:
         return "diffusionvl_qwen"
@@ -161,6 +178,33 @@ def _detect_model_type(model_path, model_name, force_model_type):
         return "llava_qwen"
 
     raise ValueError(f"Cannot detect model type for {model_name}. Please specify force_model_type.")
+
+
+def _load_diffusionvl_qwen3vl(model_path, attn_implementation, customized_config, overwrite_config, kwargs):
+    """Load DiffusionVL-Qwen3VL model (Qwen3-VL + DeepStack + BD3-LM)."""
+    from llava.model.language_model.llava_diffusionvl_qwen3vl import DiffusionVLQwen3VLConfig, DiffusionVLQwen3VLForCausalLM
+
+    rank0_print(f"Loading DiffusionVL-Qwen3VL (Qwen3-VL + DeepStack + BD3-LM) from: {model_path}")
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+    if customized_config is None:
+        llava_cfg = DiffusionVLQwen3VLConfig.from_pretrained(model_path)
+    else:
+        llava_cfg = customized_config
+
+    if overwrite_config is not None:
+        rank0_print(f"Overwriting config with {overwrite_config}")
+        for k, v in overwrite_config.items():
+            setattr(llava_cfg, k, v)
+
+    model = DiffusionVLQwen3VLForCausalLM.from_pretrained(
+        model_path,
+        low_cpu_mem_usage=True,
+        attn_implementation=attn_implementation,
+        config=llava_cfg,
+        **kwargs
+    )
+    return tokenizer, model
 
 
 def _load_diffusionvl_qwenvl(model_path, attn_implementation, customized_config, overwrite_config, kwargs):

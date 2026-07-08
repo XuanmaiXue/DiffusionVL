@@ -14,6 +14,12 @@
 #   - TF32 is NVIDIA-only and is disabled; NPU trains in bf16 natively
 #   - Attention defaults to "eager" (CANN's SDPA/Flash support varies by version)
 #   - NCCL_* env vars are removed; HCCL_* env vars are set instead
+#
+# Dependency note:
+#   DeepSpeed >= 0.16 is REQUIRED on NPU. Earlier versions abort ZeRO-3 init
+#   with `assert len(set(t.dtype for t in tensors)) == 1` because the ZeRO-3
+#   parameter partitioning did not handle the mixed bf16/fp32 layout produced
+#   by `initialize_vision_modules` correctly on Ascend.
 
 export OMP_NUM_THREADS=8
 
@@ -24,8 +30,10 @@ export OMP_NUM_THREADS=8
 # collective-communication backend used by torch.distributed.
 export HCCL_TIMEOUT=7200              # seconds; large enough for long prefills
 export HCCL_CONNECT_TIMEOUT=7200
-export HCCL_ALGO=level0               # Algorithm: level0 (mesh) / ring / ...
-export HCCL_WHITELIST_DISABLE=1       # Allow all algorithms
+# Let HCCL auto-select the collective algorithm. If you must set it manually,
+# the required format is "level0:NA;level1:<algo>" (e.g. ring / mesh), NOT a
+# bare "level0" — a malformed value aborts init with ERR02200.
+export HCCL_WHITELIST_DISABLE=1       # Allow all algorithms (auto-selection)
 export HCCL_IF_BASE_PORT=16000        # Base port for HCCL P2P
 # Set the network interface for HCCL (like NCCL_SOCKET_IFNAME).
 # TODO: replace with your actual NPU-facing network interface (e.g. eth0 / bond0)

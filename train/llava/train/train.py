@@ -278,7 +278,10 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: st
         check_only_save_mm_adapter_tunnable = False
 
     trainer.accelerator.wait_for_everyone()
-    torch.cuda.synchronize()
+    # Device-agnostic synchronize (PyTorch 2.4+): works across CUDA, NPU, etc.
+    # Replaces the previous torch.cuda.synchronize(), which raised
+    # "Torch not compiled with CUDA enabled" on Ascend (NPU) builds.
+    torch.accelerator.synchronize()
     rank0_print(f"Only save projectors: {check_only_save_mm_adapter_tunnable}")
     if check_only_save_mm_adapter_tunnable:
         # Only save Adapter
