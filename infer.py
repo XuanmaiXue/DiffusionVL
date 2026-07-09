@@ -32,6 +32,19 @@ from transformers import AutoImageProcessor
 # TODO: configure these paths
 # ============================================
 local_model_path = '/home/ma-user/work/xuemaixuan/data/dVLM/outputs/diffusionvl_qwenvl_finetune_npu/debug'
+# Path containing preprocessor_config.json. Training checkpoints only save
+# weights + config.json, NOT the image processor. Point this to the ORIGINAL
+# (pre-conversion) checkpoint of the SAME generation as local_model_path:
+#   - Qwen2.5-VL trained checkpoint  -> original Qwen2.5-VL (patch_size=14)
+#   - Qwen3-VL   trained checkpoint  -> original Qwen3-VL   (patch_size=16)
+# Cross-generation is NOT compatible (different patch_size / processor_class).
+# Alternatively, copy preprocessor_config.json from there into local_model_path
+# and set preprocessor_path = local_model_path.
+#
+# For Qwen2.5-VL:
+preprocessor_path = '/home/ma-user/work/xuemaixuan/data/dVLM/ckpt/Qwen2.5-VL-7B-Instruct'
+# For Qwen3-VL, uncomment and use instead:
+# preprocessor_path = '/home/ma-user/work/xuemaixuan/data/dVLM/ckpt/Qwen3-VL-4B-Instruct'
 image_path = "/home/ma-user/work/xuemaixuan/data/dVLM/dataset/LLaVA-Pretrain/images_subset/00000/000007653.jpg"
 question = "Describe this image."
 # ============================================
@@ -48,8 +61,10 @@ model = AutoModelForCausalLM.from_pretrained(
 model.eval()
 device = next(model.parameters()).device
 
-tokenizer = AutoTokenizer.from_pretrained(local_model_path)
-image_processor = AutoImageProcessor.from_pretrained(local_model_path, use_fast=False)
+tokenizer = AutoTokenizer.from_pretrained(local_model_path, fix_mistral_regex=True)
+# Image processor is loaded from the original checkpoint (has preprocessor_config.json).
+_pp = preprocessor_path if os.path.exists(os.path.join(preprocessor_path, "preprocessor_config.json")) else local_model_path
+image_processor = AutoImageProcessor.from_pretrained(_pp, use_fast=False)
 
 # --- 2. Build the conversation prompt (ChatML, single <image> placeholder) ---
 image = Image.open(image_path).convert("RGB")
