@@ -236,10 +236,16 @@ class DiffusionVLQwen3VLAttention(Qwen3VLTextAttention):
                     key_states, value_states, self.layer_idx, cache_kwargs
                 )
             else:
-                if self.layer_idx < len(past_key_values):
-                    past_key_states, past_value_states = past_key_values[self.layer_idx]
-                    key_states = torch.cat([past_key_states, key_states], dim=2)
-                    value_states = torch.cat([past_value_states, value_states], dim=2)
+                # Read cached KV without updating (for block-diffusion re-evaluation).
+                # transformers >= 5.x DynamicCache uses .layers[idx].keys/.values.
+                _layers = getattr(past_key_values, "layers", None)
+                if _layers is not None and self.layer_idx < len(_layers):
+                    layer_cache = _layers[self.layer_idx]
+                    past_key_states = getattr(layer_cache, "keys", getattr(layer_cache, "key_cache", None))
+                    past_value_states = getattr(layer_cache, "values", getattr(layer_cache, "value_cache", None))
+                    if past_key_states is not None and past_key_states.numel() > 0:
+                        key_states = torch.cat([past_key_states, key_states], dim=2)
+                        value_states = torch.cat([past_value_states, value_states], dim=2)
 
         attention_interface: Callable = eager_attention_forward
         if self.config._attn_implementation != "eager":
@@ -481,6 +487,8 @@ def prepare_inputs_labels_for_multimodal(
         image_features.append(image_feat)
 
     _attention_mask = attention_mask
+    _labels = labels  # save original for later None-check
+    _position_ids = position_ids  # save original for later None-check
     if attention_mask is None:
         attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
     else:
