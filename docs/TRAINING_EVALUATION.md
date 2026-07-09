@@ -135,3 +135,39 @@ Based on [lmms-eval](https://github.com/EvolvingLMMs-Lab/lmms-eval).
 | `TOTAL_GPUS` | Number of GPUs to use | 8 |
 | `BLOCK_SIZE` | BD3-LM block size | 8 |
 | `STEPS` | Denoising steps | 8 |
+
+---
+
+## Packaging a Trained Checkpoint for HF Release
+
+A training run (`trainer.save_model`) produces a checkpoint that is already in
+the correct weight layout for release — verified against the published
+`huggingface.co/hustvl/DiffusionVL-Qwen2.5VL-3B`. The packaging step only
+re-shards, rewrites the config, and bundles the `trust_remote_code` files.
+
+```bash
+cd scripts/diffusionvl_prepare
+python convert_diffusionvl_to_hf_release.py \
+    --src_checkpoint_dir /path/to/training/output \
+    --dest_dir ./DiffusionVL-Qwen2.5VL-release \
+    --remote_code_source /path/to/dir/with/remote_code_py
+```
+
+`--remote_code_source` must point at a directory containing the three
+`*_diffusionvl_qwen2_5_vl.py` files (`configuration`, `modeling`,
+`processing`). Without them the release will not load with
+`trust_remote_code=True`.
+
+What the script does:
+
+- re-shards weights into `model-0000N-of-0000M.safetensors` + index;
+- drops a duplicate tied `lm_head.weight` if present;
+- rewrites `config.json` (sets `architectures`/`auto_map`, scrubs local paths);
+- copies tokenizer / preprocessor / generation files;
+- copies the remote-code bundle.
+
+Run the self-test to verify the packaging contract:
+
+```bash
+python test_convert_to_hf_release.py
+```
