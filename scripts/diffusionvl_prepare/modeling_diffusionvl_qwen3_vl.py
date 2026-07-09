@@ -119,6 +119,10 @@ class DiffusionVLQwen3VLVisionTower(nn.Module):
         hidden_states = self.vision_tower.patch_embed(hidden_states)
 
         pos_embeds = self.vision_tower.fast_pos_embed_interpolate(grid_thw)
+        # Align dtype: pos_embeds (from nn.Embedding) may be float32 while
+        # hidden_states / model weights are bfloat16. NPU's aclnnLayerNorm
+        # requires input and weight to share a dtype.
+        pos_embeds = pos_embeds.to(dtype=hidden_states.dtype, device=hidden_states.device)
         hidden_states = hidden_states + pos_embeds
 
         rotary_pos_emb = self.vision_tower.rot_pos_emb(grid_thw)
@@ -127,7 +131,7 @@ class DiffusionVLQwen3VLVisionTower(nn.Module):
         hidden_states = hidden_states.reshape(seq_len, -1)
         rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
         emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
-        position_embeddings = (emb.cos(), emb.sin())
+        position_embeddings = (emb.cos().to(hidden_states.dtype), emb.sin().to(hidden_states.dtype))
 
         cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
             dim=0, dtype=torch.int32
