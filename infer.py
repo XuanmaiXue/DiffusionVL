@@ -52,10 +52,21 @@ question = "Describe this image."
 # --- 1. Load everything with a single from_pretrained ---
 # trust_remote_code is not needed: the model classes are registered by the
 # `import llava.model` above. from_pretrained() auto-builds vision modules.
+#
+# Use a single device (not device_map="auto"). DiffusionVL's vision tower is
+# built inside from_pretrained and pinned to one device; with device_map="auto"
+# on multi-NPU/GPU setups the image tensor can land on a different device than
+# the vision tower weights, causing "same device" errors. Pin to one device.
+if torch.cuda.is_available():
+    _device = "cuda:0"
+elif hasattr(torch, "npu") and torch.npu.is_available():
+    _device = "npu:0"
+else:
+    _device = "cpu"
 model = AutoModelForCausalLM.from_pretrained(
     local_model_path,
     torch_dtype=torch.bfloat16,
-    device_map="auto" if (torch.cuda.is_available() or (hasattr(torch, "npu") and torch.npu.is_available())) else None,
+    device_map=_device,
     low_cpu_mem_usage=True,
 )
 model.eval()
@@ -101,7 +112,7 @@ with torch.inference_mode():
         gen_kwargs["image_grid_thws"] = image_grid_thws
 
     output_ids = model.generate(
-        input_ids=input_ids,
+        inputs=input_ids,
         attention_mask=attention_mask,
         images=image_tensor,
         modalities=["image"],
