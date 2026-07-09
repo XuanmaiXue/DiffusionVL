@@ -51,6 +51,11 @@ class DiffusionVLQwen3VLConfig(PretrainedConfig):
         # Strip nested text_config so it doesn't leak into GenerationConfig.
         kwargs.pop("text_config", None)
 
+        # Qwen3-VL checkpoints don't define pad_token_id; transformers >= 5.x
+        # no longer defaults it. Use the EOS token as pad (Qwen convention).
+        if "pad_token_id" not in kwargs:
+            kwargs["pad_token_id"] = kwargs.get("eos_token_id", 151645)
+
         super().__init__(
             tie_word_embeddings=tie_word_embeddings,
             **kwargs,

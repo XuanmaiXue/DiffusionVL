@@ -632,7 +632,8 @@ class DiffusionVLQwen3VLPreTrainedModel(Qwen3VLPreTrainedModel):
 class DiffusionVLQwen3VLForConditionalGeneration(DiffusionVLQwen3VLPreTrainedModel):
     """DiffusionVL-Qwen3VL for inference (BD3-LM block-diffusion generation)."""
 
-    _tied_weights_keys = ["lm_head.weight"]
+    # transformers >= 5.x expects _tied_weights_keys as a dict (target -> source).
+    _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
 
     def __init__(self, config):
         super().__init__(config)
@@ -642,6 +643,11 @@ class DiffusionVLQwen3VLForConditionalGeneration(DiffusionVLQwen3VLPreTrainedMod
         self.mask_token_id = getattr(config, "mask_token_id", 151671)
         self.block_size = getattr(config, "bd3lm_block_size", 8)
         self.post_init()
+
+    def tie_weights(self, *args, **kwargs):
+        """Tie lm_head with embed_tokens if config.tie_word_embeddings is True."""
+        if getattr(self.config, "tie_word_embeddings", False):
+            super().tie_weights(*args, **kwargs)
 
     def get_input_embeddings(self):
         return self.model.embed_tokens
