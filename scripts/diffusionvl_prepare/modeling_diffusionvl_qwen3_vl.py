@@ -1021,7 +1021,7 @@ class DiffusionVLQwen3VLForConditionalGeneration(DiffusionVLQwen3VLPreTrainedMod
     @staticmethod
     def _get_num_transfer_tokens(block_length, steps):
         if steps == 0:
-            return torch.zeros(0, dtype=torch.int64)
+            return torch.zeros(1, dtype=torch.int64)
         base = block_length // steps
         remainder = block_length % steps
         num_transfer_tokens = torch.zeros(steps + 1, dtype=torch.int64) + base

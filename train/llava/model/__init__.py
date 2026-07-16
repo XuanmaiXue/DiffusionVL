@@ -1,6 +1,7 @@
 import os
 from .language_model.llava_diffusionvl_qwenvl import DiffusionVLQwenVLForCausalLM, DiffusionVLQwenVLConfig
 from .language_model.llava_diffusionvl_qwen3vl import DiffusionVLQwen3VLForCausalLM, DiffusionVLQwen3VLConfig
+from .language_model.llava_diffusionvl_qwen3_5 import DiffusionVLQwen3_5ForCausalLM, DiffusionVLQwen3_5Config
 from .language_model.llava_llada import LlavaLLaDAModelLM, LlavaLLaDAConfig
 from .language_model.llava_qwen import LlavaQwenForCausalLM, LlavaQwenConfig
 from .language_model.llava_diffusionvl_qwen import DiffusionVLQwenForCausalLM, DiffusionVLQwenConfig
@@ -12,6 +13,8 @@ __all__ = [
     "DiffusionVLQwenVLConfig",
     "DiffusionVLQwen3VLForCausalLM",
     "DiffusionVLQwen3VLConfig",
+    "DiffusionVLQwen3_5ForCausalLM",
+    "DiffusionVLQwen3_5Config",
     "LlavaLLaDAModelLM",
     "LlavaLLaDAConfig",
     "LlavaQwenForCausalLM",

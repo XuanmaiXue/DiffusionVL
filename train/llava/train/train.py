@@ -62,7 +62,7 @@ class ModelArguments:
 
     force_model_type: Optional[str] = field(
         default=None,
-        metadata={"help": "Explicitly specify model type. Options: 'llava_qwen' (standard AR), 'diffusionvl_qwen' (Qwen2.5 + BD3LM), 'diffusionvl_qwenvl' (Qwen2.5-VL + BD3LM), 'diffusionvl_qwen3vl' (Qwen3-VL + BD3LM), 'llava_llada_bd3lm' (LLaDA + BD3-LM)"}
+        metadata={"help": "Explicitly specify model type. Options: 'llava_qwen' (standard AR), 'diffusionvl_qwen' (Qwen2.5 + BD3LM), 'diffusionvl_qwenvl' (Qwen2.5-VL + BD3LM), 'diffusionvl_qwen3vl' (Qwen3-VL + BD3LM), 'diffusionvl_qwen3_5' (Qwen3.5 hybrid + BD3LM), 'llava_llada_bd3lm' (LLaDA + BD3-LM)"}
     )
 
     enable_bd3lm: bool = field(
@@ -1412,13 +1412,26 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
                 rank0_print(f"Using force_model_type: {model_args.force_model_type}")
                 is_diffusionvl_qwenvl = model_args.force_model_type == "diffusionvl_qwenvl"
                 is_diffusionvl_qwen3vl = model_args.force_model_type == "diffusionvl_qwen3vl"
+                is_diffusionvl_qwen3_5 = model_args.force_model_type == "diffusionvl_qwen3_5"
                 is_diffusionvl_qwen = model_args.force_model_type == "diffusionvl_qwen"
                 is_llava_qwen = model_args.force_model_type == "llava_qwen"
             else:
                 raise ValueError(f"Unknown model type: {model_args.force_model_type}")
 
 
-            if is_diffusionvl_qwen3vl:
+            if is_diffusionvl_qwen3_5:
+                rank0_print("Loading DiffusionVL-Qwen3.5 (hybrid Gated DeltaNet + full attention + BD3-LM)")
+                from llava.model.language_model.llava_diffusionvl_qwen3_5 import DiffusionVLQwen3_5ForCausalLM
+                model = DiffusionVLQwen3_5ForCausalLM.from_pretrained(
+                    model_args.model_name_or_path,
+                    cache_dir=training_args.cache_dir,
+                    attn_implementation=training_args.attn_implementation,
+                    torch_dtype=(torch.bfloat16 if training_args.bf16 else None),
+                    low_cpu_mem_usage=False,
+                    **customized_kwargs,
+                    **bnb_model_from_pretrained_args,
+                )
+            elif is_diffusionvl_qwen3vl:
                 rank0_print("Loading DiffusionVL-Qwen3VL (Qwen3-VL + BD3-LM)")
                 from llava.model.language_model.llava_diffusionvl_qwen3vl import DiffusionVLQwen3VLForCausalLM
                 model = DiffusionVLQwen3VLForCausalLM.from_pretrained(
