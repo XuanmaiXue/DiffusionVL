@@ -388,6 +388,19 @@ def preprocess_qwen(sources, tokenizer: transformers.PreTrainedTokenizer, has_im
     chat_template = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
     tokenizer.chat_template = chat_template
 
+    # Wrapper to handle transformers 4.x vs 5.x return type differences.
+    # 4.x: apply_chat_template(tokenize=True) → list[int]
+    # 5.x: apply_chat_template(tokenize=True) → BatchEncoding (use return_dict=False
+    #      to get list[int], but that kwarg doesn't exist in 4.x)
+    def _chat_template_ids(messages):
+        try:
+            return tokenizer.apply_chat_template(
+                messages, tokenize=True, add_generation_prompt=False, return_dict=False)
+        except TypeError:
+            # transformers 4.x doesn't accept return_dict
+            return tokenizer.apply_chat_template(
+                messages, tokenize=True, add_generation_prompt=False)
+
     # Apply prompt templates
     input_ids, targets = [], []
     for i, source in enumerate(sources):
@@ -396,16 +409,12 @@ def preprocess_qwen(sources, tokenizer: transformers.PreTrainedTokenizer, has_im
 
         input_id, target = [], []
 
-        # New version, use apply chat template
-        # Build system message for each sentence
-        _sys = tokenizer.apply_chat_template([{"role" : "system", "content" : system_message}], tokenize=True, add_generation_prompt=False)
-        # transformers 5.x returns BatchEncoding (dict with 'input_ids'); 4.x returns list
-        _sys_ids = _sys["input_ids"] if isinstance(_sys, dict) else _sys
+        # System message
+        _sys_ids = _chat_template_ids([{"role": "system", "content": system_message}])
         input_id += _sys_ids
         target += [IGNORE_INDEX] * len(_sys_ids)
 
         for conv in source:
-            # Make sure llava data can load
             try:
                 role = conv["role"]
                 content = conv["content"]
@@ -413,11 +422,9 @@ def preprocess_qwen(sources, tokenizer: transformers.PreTrainedTokenizer, has_im
                 role = conv["from"]
                 content = conv["value"]
 
-            role =  roles.get(role, role)
+            role = roles.get(role, role)
 
-            conv = [{"role" : role, "content" : content}]
-            _enc = tokenizer.apply_chat_template(conv, tokenize=True, add_generation_prompt=False)
-            encode_id = _enc["input_ids"] if isinstance(_enc, dict) else _enc
+            encode_id = _chat_template_ids([{"role": role, "content": content}])
             input_id += encode_id
             if role in ["user", "system"]:
                 target += [IGNORE_INDEX] * len(encode_id)
