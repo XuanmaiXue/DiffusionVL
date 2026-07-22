@@ -377,7 +377,9 @@ def preprocess_qwen(sources, tokenizer: transformers.PreTrainedTokenizer, has_im
         tokenizer.add_tokens(["<image>"], special_tokens=True)
 
     image_token_index = tokenizer.convert_tokens_to_ids("<image>")
-    im_start, im_end = tokenizer.additional_special_tokens_ids[:2] # qwen 2.5's additional_special_tokens is more than qwen 2
+    # transformers 5.x removed additional_special_tokens_ids; use convert_tokens_to_ids
+    im_start = tokenizer.convert_tokens_to_ids("<|im_start|>")
+    im_end = tokenizer.convert_tokens_to_ids("<|im_end|>")
     # unmask_tokens = ["<|im_start|>", "<|im_start|>", "\n"]
     unmask_tokens_idx =  [198, im_start, im_end]
     nl_tokens = tokenizer("\n").input_ids
@@ -396,8 +398,11 @@ def preprocess_qwen(sources, tokenizer: transformers.PreTrainedTokenizer, has_im
 
         # New version, use apply chat template
         # Build system message for each sentence
-        input_id += tokenizer.apply_chat_template([{"role" : "system", "content" : system_message}])
-        target += [IGNORE_INDEX] * len(input_id)
+        _sys = tokenizer.apply_chat_template([{"role" : "system", "content" : system_message}], tokenize=True, add_generation_prompt=False)
+        # transformers 5.x returns BatchEncoding (dict with 'input_ids'); 4.x returns list
+        _sys_ids = _sys["input_ids"] if isinstance(_sys, dict) else _sys
+        input_id += _sys_ids
+        target += [IGNORE_INDEX] * len(_sys_ids)
 
         for conv in source:
             # Make sure llava data can load
@@ -409,9 +414,10 @@ def preprocess_qwen(sources, tokenizer: transformers.PreTrainedTokenizer, has_im
                 content = conv["value"]
 
             role =  roles.get(role, role)
-            
+
             conv = [{"role" : role, "content" : content}]
-            encode_id = tokenizer.apply_chat_template(conv)
+            _enc = tokenizer.apply_chat_template(conv, tokenize=True, add_generation_prompt=False)
+            encode_id = _enc["input_ids"] if isinstance(_enc, dict) else _enc
             input_id += encode_id
             if role in ["user", "system"]:
                 target += [IGNORE_INDEX] * len(encode_id)

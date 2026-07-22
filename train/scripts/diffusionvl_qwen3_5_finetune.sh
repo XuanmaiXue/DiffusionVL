@@ -86,7 +86,6 @@ torchrun --nproc_per_node=${gpu_num} --nnodes=${num_node} --master_addr=${MASTER
     --bd3lm_block_aligned_eos True \
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \
-    --tf32 True \
     --model_max_length 8192 \
     --gradient_checkpointing True \
     --dataloader_num_workers 4 \

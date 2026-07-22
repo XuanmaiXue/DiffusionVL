@@ -275,7 +275,7 @@ class LLaVATrainer(Trainer):
         if self.train_dataset is None or not has_length(self.train_dataset):
             return None
 
-        if self.args.group_by_length:
+        if getattr(self.args, "group_by_length", False):
             lengths = self.train_dataset.lengths
             return LengthGroupedSampler(
                 # self.args.train_batch_size * self.args.gradient_accumulation_steps, # TODO: seems that we should not have gradient_accumulation_steps
