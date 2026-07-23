@@ -514,9 +514,17 @@ class LLaVATrainer(Trainer):
 
             # Maybe delete some older checkpoints.
             if self.args.should_save:
-                # Solely rely on numerical checkpoint id for rotation.
-                # mtime is not reliable especially on some fuse fs in cloud environments.
-                self._rotate_checkpoints(use_mtime=False, output_dir=run_dir)
+                # transformers 4.x uses self._rotate_checkpoints (method);
+                # transformers 5.x uses rotate_checkpoints (function in trainer_utils).
+                if hasattr(self, "_rotate_checkpoints"):
+                    self._rotate_checkpoints(use_mtime=False, output_dir=run_dir)
+                else:
+                    from transformers.trainer_utils import rotate_checkpoints
+                    rotate_checkpoints(
+                        output_dir=run_dir,
+                        save_total_limit=getattr(self.args, "save_total_limit", None),
+                        best_model_checkpoint=self.state.best_model_checkpoint,
+                    )
 
 
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
