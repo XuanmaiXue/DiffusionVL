@@ -17,7 +17,11 @@ import torch
 
 
 def snapshot_linear_cache(cache):
-    """Snapshot conv_states + recurrent_states of all linear-attention layers."""
+    """Snapshot conv_states + recurrent_states of all linear-attention layers.
+
+    conv_states and recurrent_states are dict[int, Tensor] (keyed by state_idx),
+    so we deep-copy each tensor inside the dict.
+    """
     from transformers.cache_utils import LinearAttentionCacheLayerMixin
     snapshot = {}
     layers = getattr(cache, "layers", None)
@@ -25,23 +29,50 @@ def snapshot_linear_cache(cache):
         return snapshot
     for idx, layer in enumerate(layers):
         if isinstance(layer, LinearAttentionCacheLayerMixin):
-            conv = layer.conv_states.clone() if layer.conv_states is not None else None
-            recur = layer.recurrent_states.clone() if layer.recurrent_states is not None else None
-            snapshot[idx] = (conv, recur, layer.is_conv_states_initialized, layer.is_recurrent_states_initialized)
+            conv_snap = {}
+            if isinstance(layer.conv_states, dict):
+                for s_idx, t in layer.conv_states.items():
+                    conv_snap[s_idx] = t.clone() if t is not None else None
+            elif isinstance(layer.conv_states, torch.Tensor):
+                conv_snap[0] = layer.conv_states.clone()
+            else:
+                conv_snap[0] = None
+
+            recur_snap = {}
+            if isinstance(layer.recurrent_states, dict):
+                for s_idx, t in layer.recurrent_states.items():
+                    recur_snap[s_idx] = t.clone() if t is not None else None
+            elif isinstance(layer.recurrent_states, torch.Tensor):
+                recur_snap[0] = layer.recurrent_states.clone()
+            else:
+                recur_snap[0] = None
+
+            conv_init = dict(layer.is_conv_states_initialized) if isinstance(layer.is_conv_states_initialized, dict) else layer.is_conv_states_initialized
+            recur_init = dict(layer.is_recurrent_states_initialized) if isinstance(layer.is_recurrent_states_initialized, dict) else layer.is_recurrent_states_initialized
+
+            snapshot[idx] = (conv_snap, recur_snap, conv_init, recur_init)
     return snapshot
 
 
 def restore_linear_cache(cache, snapshot):
-    """Restore conv_states + recurrent_states from a snapshot."""
+    """Restore conv_states + recurrent_states from a snapshot (in-place copy_)."""
     layers = getattr(cache, "layers", None)
     if layers is None:
         return
-    for idx, (conv, recur, conv_init, recur_init) in snapshot.items():
+    for idx, (conv_snap, recur_snap, conv_init, recur_init) in snapshot.items():
         layer = layers[idx]
-        if conv is not None and layer.conv_states is not None:
-            layer.conv_states.copy_(conv)
-        if recur is not None and layer.recurrent_states is not None:
-            layer.recurrent_states.copy_(recur)
+        if isinstance(layer.conv_states, dict):
+            for s_idx, t in conv_snap.items():
+                if t is not None and s_idx in layer.conv_states and layer.conv_states[s_idx] is not None:
+                    layer.conv_states[s_idx].copy_(t)
+        elif isinstance(layer.conv_states, torch.Tensor) and conv_snap.get(0) is not None:
+            layer.conv_states.copy_(conv_snap[0])
+        if isinstance(layer.recurrent_states, dict):
+            for s_idx, t in recur_snap.items():
+                if t is not None and s_idx in layer.recurrent_states and layer.recurrent_states[s_idx] is not None:
+                    layer.recurrent_states[s_idx].copy_(t)
+        elif isinstance(layer.recurrent_states, torch.Tensor) and recur_snap.get(0) is not None:
+            layer.recurrent_states.copy_(recur_snap[0])
         layer.is_conv_states_initialized = conv_init
         layer.is_recurrent_states_initialized = recur_init
 
